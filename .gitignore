@@ -1,0 +1,8 @@
+﻿config.json
+credentials.json
+senai_ementa.db
+templates/
+__pycache__/
+*.pyc
+venv/
+.streamlit/secrets.toml
