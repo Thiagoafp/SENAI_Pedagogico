@@ -144,27 +144,36 @@ def gerar_cabecalho_fo(uc: dict, contexto: str, api_key: str) -> dict:
     capacidades = "\n".join([f"- {c}" for c in uc["capacidades"]])
     conhecimentos = "\n".join([f"- {c}" for c in uc["conhecimentos"]])
 
-    prompt = f"""Você é especialista pedagógico do SENAI preenchendo o cabeçalho de um Plano de Ensino.
+    # Verifica campos vazios no banco — IA gera quando necessario
+    refs_banco = uc.get("referencias", [])
+    objetivo_banco = uc.get("objetivo_geral", "").strip()
 
-Os campos Função, Objetivo Geral e Referências já estão preenchidos automaticamente pelo sistema.
-Você deve gerar APENAS: estratégia principal, contextualização, desafio e resultados esperados.
+    instrucao_extras = ""
+    if not objetivo_banco:
+        instrucao_extras += """,
+  "objetivo_geral": "Gere o objetivo geral desta UC em uma frase clara descrevendo a competencia que o aluno desenvolve (maximo 300 caracteres)" """
+    if not refs_banco:
+        instrucao_extras += """,
+  "referencias": "Gere 3 referencias bibliograficas relevantes para esta UC no formato ABNT. Use autores e obras reais conhecidas do mercado e da academia para este tema." """
+
+    prompt = f"""Voce e especialista pedagogico do SENAI preenchendo o cabecalho de um Plano de Ensino.
 
 UC: {uc['nome']}
-Objetivo Geral: {uc.get('objetivo_geral','')}
+Objetivo Geral no banco: {objetivo_banco or 'NAO INFORMADO - voce deve gerar no campo objetivo_geral'}
 Capacidades: {capacidades}
 Contexto adicional do professor: {contexto or 'Sem contexto adicional.'}
 
-Retorne APENAS JSON válido sem markdown:
+Retorne APENAS JSON valido sem markdown:
 
 {{
   "estrategia_principal": "Projeto",
-  "contextualizacao": "2 parágrafos curtos contextualizando esta UC com a realidade dos alunos (máximo 500 caracteres no total)",
-  "desafio": "1 parágrafo descrevendo o desafio central que os alunos resolverão (máximo 400 caracteres)",
-  "resultados_esperados": "Tópicos do que os alunos serão capazes ao final (máximo 400 caracteres)"
+  "contextualizacao": "2 paragrafos curtos contextualizando esta UC com a realidade dos alunos (MAXIMO 400 caracteres no total, seja breve)",
+  "desafio": "1 paragrafo descrevendo o desafio central que os alunos resolverao (MAXIMO 300 caracteres, seja breve)",
+  "resultados_esperados": "Topicos do que os alunos serao capazes ao final (MAXIMO 300 caracteres, seja breve)"{instrucao_extras}
 }}
 
-estrategia_principal deve ser exatamente uma das opções: "Estudo de caso", "Projeto", "Situação-Problema" ou "Pesquisa Aplicada"
-IMPORTANTE: textos curtos e objetivos, sem exagerar no tamanho."""
+estrategia_principal deve ser exatamente uma das opcoes: "Estudo de caso", "Projeto", "Situacao-Problema" ou "Pesquisa Aplicada"
+CRITICO: textos CURTOS, respeite os limites de caracteres para nao ultrapassar o espaco da tabela no documento."""
 
     msg = client.messages.create(
         model=MODEL, max_tokens=2000,
@@ -177,50 +186,54 @@ IMPORTANTE: textos curtos e objetivos, sem exagerar no tamanho."""
     return json.loads(texto)
 
 
-def gerar_aulas_fo(uc: dict, contexto: str, api_key: str) -> list:
+def gerar_aulas_fo(uc: dict, contexto: str, api_key: str, total_encontros: int = None) -> list:
     """
-    Chamada 2: gera apenas a lista de aulas.
-    Dividida em blocos de 20 para evitar JSON inválido.
+    Chamada 2: gera apenas a lista de encontros/aulas.
+    Dividida em blocos de 20 para evitar JSON invalido.
+    total_encontros: numero de linhas do FO (pode ser menor que total H/A para UCs com multiplas h/encontro)
     """
     client = anthropic.Anthropic(api_key=api_key)
-    total_aulas = int(str(uc.get("carga_horaria_ha", "40")).replace("H/A", "").strip() or 40)
+    total_ha = int(str(uc.get("carga_horaria_ha", "40")).replace("H/A", "").strip() or 40)
+    if total_encontros is None:
+        total_encontros = total_ha
+    horas_por_encontro = total_ha // total_encontros
     capacidades = "\n".join([f"- {c}" for c in uc["capacidades"]])
     conhecimentos = "\n".join([f"- {c}" for c in uc["conhecimentos"]])
 
     todas_aulas = []
 
-    # Divide em blocos de 20 aulas
-    blocos = [(1, min(20, total_aulas))]
-    if total_aulas > 20:
-        blocos.append((21, total_aulas))
+    # Divide em blocos de 20
+    blocos = [(1, min(20, total_encontros))]
+    if total_encontros > 20:
+        blocos.append((21, total_encontros))
 
     for inicio, fim in blocos:
-        prompt = f"""Gere APENAS a lista de aulas {inicio} a {fim} para o Plano de Ensino SENAI.
+        prompt = f"""Gere APENAS a lista de encontros {inicio} a {fim} para o Plano de Ensino SENAI.
 
-UC: {uc['nome']} | Total: {total_aulas} aulas de 1h
+UC: {uc['nome']} | Total: {total_ha} H/A em {total_encontros} encontros de {horas_por_encontro}h cada
 Capacidades: {capacidades}
-Conhecimentos disponíveis: {conhecimentos}
+Conhecimentos disponiveis: {conhecimentos}
 Contexto: {contexto or 'Sem contexto.'}
 
-Retorne APENAS JSON válido sem markdown:
+Retorne APENAS JSON valido sem markdown:
 
 {{
   "aulas": [
     {{
       "numero": {inicio},
-      "capacidade": "capacidade desenvolvida nesta aula",
-      "conhecimento": "Título do conteúdo abordado",
-      "estrategia": "Teoria (Projetor/Lousa); Exercícios Guiados; Laboratório.",
-      "criterio_avaliacao": "como será avaliado",
-      "instrumento": "instrumento específico",
+      "capacidade": "capacidade desenvolvida neste encontro",
+      "conhecimento": "Titulo do conteudo abordado",
+      "estrategia": "Teoria (Projetor/Lousa); Exercicios Guiados; Laboratorio.",
+      "criterio_avaliacao": "como sera avaliado",
+      "instrumento": "instrumento especifico",
       "recursos": "recursos utilizados"
     }}
   ]
 }}
 
-Gere exatamente as aulas de {inicio} até {fim}.
-Textos curtos e objetivos em cada campo (máximo 100 caracteres por campo).
-Progressão lógica dos conteúdos."""
+Gere exatamente os encontros de {inicio} ate {fim}.
+Textos curtos e objetivos em cada campo (maximo 100 caracteres por campo).
+Progressao logica dos conteudos cobrindo toda a UC em {total_encontros} encontros."""
 
         msg = client.messages.create(
             model=MODEL, max_tokens=8000,
@@ -250,11 +263,13 @@ Progressão lógica dos conteúdos."""
 
 def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
                  aulas: list, nome_docente: str = "",
-                 funcao: str = "Instrutor de Informática",
+                 funcao: str = "Instrutor de Informatica",
                  subfuncao: str = "") -> bytes:
     doc = Document(template_path)
     tables = doc.tables
     total_aulas = len(aulas)
+    total_ha = int(str(uc.get("carga_horaria_ha", "40")).replace("H/A", "").strip() or 40)
+    horas_por_encontro = max(1, total_ha // total_aulas) if total_aulas > 0 else 1
 
     # ── TABELA 0: Cabeçalho ───────────────────────────────────────────────────
     t0 = tables[0]
@@ -307,7 +322,9 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
     print(f"DEBUG refs: {uc.get('referencias', [])[:1]}")
     set_text_t1(1, 1, funcao, uppercase=True)
     set_text_t1(2, 1, subfuncao, uppercase=True)
-    set_text_t1(3, 1, uc.get('objetivo_geral', ''), font_size=10)
+    # Usa objetivo do banco ou o gerado pela IA
+    objetivo = uc.get('objetivo_geral', '').strip() or cabecalho.get('objetivo_geral', '')
+    set_text_t1(3, 1, objetivo, font_size=10)
 
     # ── TABELA 2: Estratégias ─────────────────────────────────────────────────
     t2 = tables[2]
@@ -339,9 +356,8 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
     while len(t3.rows) > 6:
         t3._tbl.remove(t3.rows[-1]._tr)
 
-    # Fixa alturas da tabela 3 — não cresce com o texto (hRule=exact)
-    # Alturas ajustadas pelo professor para caber na página 1
-    alturas_t3 = [280, 274, 1284, 274, 1450, 1570]
+    # Alturas minimas da tabela 3 — atLeast permite crescer se necessario
+    alturas_t3 = [280, 800, 800, 800, 800, 1200]
     for i, row in enumerate(t3.rows):
         if i >= len(alturas_t3):
             break
@@ -354,7 +370,7 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
             trH = OxmlElement("w:trHeight")
             trPr.append(trH)
         trH.set(qn("w:val"), str(alturas_t3[i]))
-        trH.set(qn("w:hRule"), "exact")
+        trH.set(qn("w:hRule"), "atLeast")
 
     # Acessa células da tabela 3 diretamente pelo XML para evitar
     # erro de resolução de vMerge no python-docx
@@ -454,7 +470,8 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
         bim = calcular_bimestre(aula["numero"], total_aulas)
         set_cell_text(row.cells[0], f"{aula['numero']}\n{bim}",
                       font_size=9, align="center", valign="center")
-        set_cell_text(row.cells[1], "1h",
+        horas_enc = total_ha // total_aulas if total_aulas > 0 else 1
+        set_cell_text(row.cells[1], f"{horas_enc}h",
                       font_size=9, align="center", valign="center")
         set_cell_text(row.cells[2], aula.get("capacidade", ""),
                       font_size=9, valign="top")
@@ -469,11 +486,15 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
         set_cell_text(row.cells[7], aula.get("recursos", ""),
                       font_size=9, valign="top")
 
-    # ── TABELA 6: Referências — via XML direto ───────────────────────────────
+    # ── TABELA 6: Referências — banco ou IA ─────────────────────────────────
     if len(tables) > 6:
         t6 = tables[6]
         refs_lista = uc.get("referencias", [])
-        refs = "\n".join(refs_lista) if refs_lista else ""
+        # Se banco tem referencias usa elas, senao usa as geradas pela IA
+        if refs_lista:
+            refs = "\n".join(refs_lista)
+        else:
+            refs = cabecalho.get("referencias", "")
         if len(t6.rows) > 1 and refs:
             tc_ref = t6.rows[1]._tr.findall(qn("w:tc"))
             if tc_ref:
@@ -510,12 +531,12 @@ def preencher_fo(template_path: str, uc: dict, cabecalho: dict,
 
 def gerar_fo_completo(uc_id: int, api_key: str, contexto: str = "",
                       nome_docente: str = "", template_path: str = None,
-                      funcao: str = "Instrutor de Informática",
-                      subfuncao: str = "") -> bytes:
-    """Gera o FO completo em duas chamadas separadas."""
+                      funcao: str = "Instrutor de Informatica",
+                      subfuncao: str = "", on_etapa=None) -> bytes:
+    """Gera o FO completo. on_etapa(descricao) chamado a cada etapa concluida."""
     uc = carregar_uc(uc_id)
     if not uc:
-        raise ValueError(f"UC {uc_id} não encontrada")
+        raise ValueError(f"UC nao encontrada")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -523,23 +544,65 @@ def gerar_fo_completo(uc_id: int, api_key: str, contexto: str = "",
                    (SELECT curso_id FROM unidades_curriculares WHERE id = ?)""", (uc_id,))
     row = cur.fetchone()
     conn.close()
-    uc['curso_nome'] = row[0] if row else "TÉCNICO EM DESENVOLVIMENTO DE SISTEMAS"
+    uc['curso_nome'] = row[0] if row else "TECNICO EM DESENVOLVIMENTO DE SISTEMAS"
 
     if not template_path:
         template_path = "FO_template.docx"
 
-    print(f"🤖 Gerando cabeçalho para: {uc['nome']}")
+    import streamlit as st
+
+    # Cria ou reutiliza placeholder unico — sobrescreve sempre a mesma linha
+    try:
+        if "_fo_log_placeholder" not in st.session_state:
+            st.session_state["_fo_log_placeholder"] = st.empty()
+        _placeholder = st.session_state["_fo_log_placeholder"]
+    except Exception:
+        _placeholder = None
+
+    def log(msg):
+        try:
+            msg_safe = msg.encode('ascii', 'ignore').decode('ascii').strip()
+            if msg_safe and _placeholder:
+                _placeholder.info(msg_safe)
+        except Exception:
+            print(msg)
+
+    def notificar(descricao):
+        if on_etapa:
+            try:
+                on_etapa(descricao)
+            except Exception:
+                pass
+
+    log("Gerando cabecalho e estrategia...")
     cabecalho = gerar_cabecalho_fo(uc, contexto, api_key)
-    print(f"✅ Cabeçalho gerado")
+    log("Cabecalho gerado!")
+    notificar("Cabecalho gerado")
 
-    print(f"📋 Gerando aulas...")
-    aulas = gerar_aulas_fo(uc, contexto, api_key)
-    print(f"✅ {len(aulas)} aulas geradas")
+    total_ha = int(str(uc.get("carga_horaria_ha", "40")).replace("H/A", "").strip() or 40)
+    if total_ha <= 40:
+        total_encontros = total_ha
+    elif total_ha <= 80:
+        total_encontros = total_ha // 2
+    else:
+        total_encontros = total_ha // 3
+    log(f"Gerando {total_encontros} encontros de {total_ha // total_encontros}h...")
+    aulas = gerar_aulas_fo(uc, contexto, api_key, total_encontros)
+    log(f"{len(aulas)} encontros gerados!")
+    notificar("Sequencia didatica gerada")
 
-    print("📝 Preenchendo template...")
+    log("Preenchendo template Word...")
     resultado = preencher_fo(template_path, uc, cabecalho, aulas,
                             nome_docente, funcao, subfuncao)
-    print("✅ FO gerado!")
+    log("FO finalizado!")
+    notificar("Template preenchido")
+    # Limpa o placeholder apos conclusao
+    try:
+        if _placeholder:
+            _placeholder.empty()
+        st.session_state.pop("_fo_log_placeholder", None)
+    except Exception:
+        pass
     return resultado
 
 

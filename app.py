@@ -8,6 +8,8 @@ import streamlit as st
 import sqlite3
 import json
 import os
+import io
+import zipfile
 import tempfile
 from pathlib import Path
 
@@ -29,6 +31,21 @@ st.markdown("""
         margin-bottom: 20px;
     }
     .status-gerado { color: #28a745; font-weight: bold; }
+
+    /* Botao Entrar — paleta SENAI */
+    div[data-testid="stForm"] button[kind="primaryFormSubmit"],
+    div[data-testid="stForm"] button[type="submit"] {
+        background-color: #003087 !important;
+        border: 2px solid #003087 !important;
+        color: white !important;
+        font-weight: bold !important;
+        transition: background-color 0.2s !important;
+    }
+    div[data-testid="stForm"] button[kind="primaryFormSubmit"]:hover,
+    div[data-testid="stForm"] button[type="submit"]:hover {
+        background-color: #FF6600 !important;
+        border-color: #FF6600 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -45,8 +62,8 @@ def check_login():
         border-radius:12px;border:1px solid #ddd;background:white;
         box-shadow:0 4px 16px rgba(0,0,0,0.08)">
         <div style="text-align:center;margin-bottom:24px">
-            <h2 style="color:#003087;margin:0">Sistema Pedagógico SENAI</h2>
-            <p style="color:#116;margin:8px 0 0">Acesso restrito</p>
+            <h2 style="color:#003087;margin:0">Sistema Pedagogico SENAI</h2>
+            <p style="color:#666;margin:8px 0 0">Acesso restrito</p>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -84,10 +101,17 @@ DB_PATH = "senai_ementa.db"
 TEMPLATES_DIR = "templates"
 
 TIPOS_DOCUMENTO = {
-    "fo_plano":    "📋 FO - Plano de Ensino",
-    "apostila":    "📖 Apostila",
-    "atividades":  "✏️ Atividades",
-    "avaliacao":   "📝 Avaliação",
+    "fo_plano":    "FO - Plano de Ensino",
+    "apostila":    "Apostila",
+    "atividades":  "Atividades",
+    "avaliacao":   "Avaliacao",
+}
+
+ICONES_DOCUMENTO = {
+    "fo_plano":    "📋",
+    "apostila":    "📖",
+    "atividades":  "✏️",
+    "avaliacao":   "📝",
 }
 
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
@@ -182,23 +206,62 @@ def listar_docs_gerados(uc_id: int) -> dict:
             resultado[tipo] = {"drive_id": drive_id, "drive_url": drive_url, "gerado_em": gerado_em}
     return resultado
 
-def registrar_doc_gerado(uc_id: int, tipo: str, drive_id: str, drive_url: str):
+def garantir_coluna_conteudo():
+    """Adiciona coluna conteudo ao banco se nao existir."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE documentos_gerados ADD COLUMN conteudo BLOB")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Coluna ja existe
+
+def registrar_doc_gerado(uc_id: int, tipo: str, drive_id: str, drive_url: str, conteudo: bytes = None):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # Remove registro anterior do mesmo tipo para esta UC
+    cur.execute("DELETE FROM documentos_gerados WHERE uc_id = ? AND tipo = ?", (uc_id, tipo))
     cur.execute("""
-        INSERT INTO documentos_gerados (uc_id, tipo, drive_id, drive_url)
-        VALUES (?, ?, ?, ?)
-    """, (uc_id, tipo, drive_id, drive_url))
+        INSERT INTO documentos_gerados (uc_id, tipo, drive_id, drive_url, conteudo)
+        VALUES (?, ?, ?, ?, ?)
+    """, (uc_id, tipo, drive_id, drive_url, conteudo))
     conn.commit()
     conn.close()
+
+def carregar_doc_gerado(uc_id: int, tipo: str) -> bytes | None:
+    """Carrega conteudo do documento do banco. Retorna None se nao existir."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT conteudo FROM documentos_gerados 
+            WHERE uc_id = ? AND tipo = ? AND conteudo IS NOT NULL
+            ORDER BY gerado_em DESC LIMIT 1
+        """, (uc_id, tipo))
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
 
 
 # ─── Geração ──────────────────────────────────────────────────────────────────
 
 def gerar_e_salvar(uc_id: int, uc_nome: str, tipo: str, config: dict,
-                   contexto: str = "", nome_docente: str = "") -> tuple:
-    """Gera documento. FO usa gerador dedicado. Outros usam template se disponível."""
-    
+                   contexto: str = "", nome_docente: str = "",
+                   on_etapa=None) -> tuple:
+    """
+    Gera documento. 
+    on_etapa: callback(pct_incremento, descricao) chamado a cada etapa concluida.
+    """
+    def notifica(descricao):
+        if on_etapa:
+            try:
+                on_etapa(descricao)
+            except Exception:
+                pass
+
     # FO usa gerador dedicado
     if tipo == "fo_plano":
         from gerador_fo import gerar_fo_completo
@@ -207,14 +270,16 @@ def gerar_e_salvar(uc_id: int, uc_nome: str, tipo: str, config: dict,
             uc_id, config["api_key"],
             contexto=contexto,
             nome_docente=nome_docente or config.get("nome_professor", ""),
-            funcao=config.get("funcao", "Instrutor de Informática"),
+            funcao=config.get("funcao", "Instrutor de Informatica"),
             subfuncao=config.get("subfuncao", ""),
-            template_path=template_fo
+            template_path=template_fo,
+            on_etapa=notifica
         )
     else:
         from gerador_documentos import gerar_documento
         template_bytes = carregar_template(tipo)
         conteudo_bytes = gerar_documento(uc_id, tipo, config["api_key"], template_bytes)
+        notifica("Documento gerado!")
 
     # Salva no Drive se configurado
     if drive_configurado(config):
@@ -237,6 +302,66 @@ def gerar_e_salvar(uc_id: int, uc_nome: str, tipo: str, config: dict,
         return drive_id, drive_url, conteudo_bytes
 
     return None, None, conteudo_bytes
+
+def gerar_lote(ucs: list, tipo: str, config: dict, progress_bar, status_atual, historico) -> dict:
+    """
+    Gera documentos em lote com progress bar por etapas reais.
+    FO: 3 etapas (cabecalho, aulas, template).
+    Outros: 1 etapa.
+    """
+    resultados = {}
+    total = len(ucs)
+    icone = ICONES_DOCUMENTO.get(tipo, "")
+    etapas_por_arquivo = 3 if tipo == "fo_plano" else 1
+    total_etapas = total * etapas_por_arquivo
+    etapas_concluidas = [0]  # lista para mutabilidade no closure
+
+    for i, (uc_id, uc_nome, ch_ha, ch_hr, serie) in enumerate(ucs):
+        # Verifica cancelamento antes de cada arquivo
+        if st.session_state.get("cancelar_lote", False):
+            status_atual.warning(f"Cancelado pelo usuario apos {i} arquivo(s).")
+            break
+
+        uc_curta = uc_nome[:35]
+        status_atual.info(f"{icone} [{i+1}/{total}] {uc_curta}...")
+
+        def on_etapa(descricao, _uc=uc_curta):
+            etapas_concluidas[0] += 1
+            pct = min(etapas_concluidas[0] / total_etapas, 1.0)
+            progress_bar.progress(pct, text=f"{descricao} — {_uc}")
+
+        try:
+            drive_id, drive_url, conteudo = gerar_e_salvar(
+                uc_id, uc_nome, tipo, config, on_etapa=on_etapa
+            )
+            # Garante que todas as etapas deste arquivo foram contadas
+            esperadas = (i + 1) * etapas_por_arquivo
+            while etapas_concluidas[0] < esperadas:
+                etapas_concluidas[0] += 1
+
+            registrar_doc_gerado(uc_id, tipo, drive_id, drive_url, conteudo)
+            resultados[uc_nome] = conteudo
+            historico.success(f"OK  {uc_curta}")
+        except Exception as e:
+            etapas_concluidas[0] = (i + 1) * etapas_por_arquivo
+            historico.error(f"Erro  {uc_curta}: {str(e)[:60]}")
+
+        progress_bar.progress(
+            min((i + 1) * etapas_por_arquivo / total_etapas, 1.0),
+            text=f"{i+1}/{total} concluidos"
+        )
+
+    return resultados
+
+def criar_zip(arquivos: dict, tipo: str) -> bytes:
+    """Cria ZIP com todos os arquivos gerados."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for uc_nome, conteudo in arquivos.items():
+            nome_limpo = uc_nome.replace("/", "-").replace(" ", "_")[:50]
+            zf.writestr(f"{nome_limpo}.docx", conteudo)
+    buf.seek(0)
+    return buf.read()
 
 
 # ─── PÁGINAS ──────────────────────────────────────────────────────────────────
@@ -390,9 +515,6 @@ def pagina_gerar_documentos():
         st.warning("⚠️ Configure sua API key nas configurações.")
         return
 
-    if not drive_configurado(config):
-        st.info("ℹ️ Google Drive não configurado — download local disponível.")
-
     cursos = listar_cursos()
     if not cursos:
         st.info("📄 Nenhuma ementa importada ainda.")
@@ -417,6 +539,11 @@ def pagina_gerar_documentos():
         ["Todas as séries"] + series_disponiveis
     )
 
+    # Filtra UCs pela serie selecionada — antes do expander
+    ucs_filtradas = ucs if serie_filtro == "Todas as séries" else [
+        u for u in ucs if u[4] == serie_filtro
+    ]
+
     # ── Seleção de UCs ──
     with st.expander("🎯 Selecionar UCs para gerar", expanded=True):
         st.caption("Marque apenas as UCs que precisa agora para economizar tokens.")
@@ -424,27 +551,23 @@ def pagina_gerar_documentos():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✅ Marcar todas"):
-                for u in ucs:
+                for u in ucs_filtradas:
                     st.session_state[f"sel_{u[0]}"] = True
                 st.rerun()
         with col2:
             if st.button("❌ Desmarcar todas"):
-                for u in ucs:
+                for u in ucs_filtradas:
                     st.session_state[f"sel_{u[0]}"] = False
                 st.rerun()
 
         st.divider()
-        # Filtra UCs pela série selecionada
-        ucs_filtradas = ucs if serie_filtro == "Todas as séries" else [
-            u for u in ucs if u[4] == serie_filtro
-        ]
         cols = st.columns(2)
         for i, (uc_id_, uc_nome_, ch_ha_, ch_hr_, serie_) in enumerate(ucs_filtradas):
             with cols[i % 2]:
                 st.session_state.setdefault(f"sel_{uc_id_}", False)
                 st.checkbox(f"{uc_nome_} ({ch_ha_} H/A) — {serie_ or ''}", key=f"sel_{uc_id_}")
 
-    ucs_selecionadas = [u for u in ucs if st.session_state.get(f"sel_{u[0]}", False)]
+    ucs_selecionadas = [u for u in ucs_filtradas if st.session_state.get(f"sel_{u[0]}", False)]
 
     if not ucs_selecionadas:
         st.info("☝️ Selecione pelo menos uma UC acima.")
@@ -459,6 +582,56 @@ def pagina_gerar_documentos():
         st.info(f"🎨 Templates personalizados ativos: {', '.join(labels)}")
     else:
         st.caption("📝 Todos os documentos usarão formato padrão IA")
+
+    st.divider()
+
+    # ── Geração em LOTE ──────────────────────────────────────────────────────
+    st.markdown("### Geracao em Lote")
+    st.caption("Gera um tipo de documento para TODAS as UCs selecionadas de uma vez.")
+
+    col_lote1, col_lote2 = st.columns([2, 1])
+    with col_lote1:
+        tipo_lote = st.selectbox("Tipo de documento para gerar em lote",
+            list(TIPOS_DOCUMENTO.keys()),
+            format_func=lambda x: TIPOS_DOCUMENTO[x],
+            key="tipo_lote")
+    with col_lote2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        gerar_lote_btn = st.button(
+            f"Gerar {ICONES_DOCUMENTO[tipo_lote]} {TIPOS_DOCUMENTO[tipo_lote]} para {len(ucs_selecionadas)} UC(s)",
+            type="primary", use_container_width=True, key="btn_lote"
+        )
+
+    if gerar_lote_btn:
+        st.session_state["cancelar_lote"] = False
+        col_prog, col_cancel = st.columns([4, 1])
+        with col_prog:
+            progress_bar = st.progress(0, text="Iniciando geracao em lote...")
+        with col_cancel:
+            if st.button("Cancelar", key="btn_cancelar_lote", type="secondary"):
+                st.session_state["cancelar_lote"] = True
+
+        status_atual = st.empty()
+        historico = st.container()
+        resultados = gerar_lote(
+            ucs_selecionadas, tipo_lote, config,
+            progress_bar, status_atual, historico
+        )
+        if st.session_state.get("cancelar_lote"):
+            status_atual.warning(f"Geracao cancelada! {len(resultados)} documento(s) gerado(s) ate o momento.")
+        elif resultados:
+            status_atual.success(f"Concluido! {len(resultados)} documento(s) gerado(s).")
+
+        if resultados:
+            zip_bytes = criar_zip(resultados, tipo_lote)
+            tipo_label = TIPOS_DOCUMENTO[tipo_lote].replace("/", "-")
+            st.download_button(
+                f"Baixar em ZIP ({len(resultados)} arquivo(s))",
+                data=zip_bytes,
+                file_name=f"{tipo_label}_lote.zip",
+                mime="application/zip",
+                key="dl_lote_zip"
+            )
 
     st.divider()
 
@@ -485,50 +658,97 @@ def pagina_gerar_documentos():
                         if ja_gerado and docs_gerados[tipo].get("drive_url"):
                             st.markdown(f"[☁️ Drive]({docs_gerados[tipo]['drive_url']})")
 
-                        if st.button(btn_label, key=f"btn_{tipo}_{uc_id}"):
-                            with st.spinner(f"Gerando {label}..."):
-                                try:
-                                    drive_id, drive_url, conteudo = gerar_e_salvar(
-                                        uc_id, uc_nome, tipo, config
-                                    )
-                                    registrar_doc_gerado(uc_id, tipo, drive_id, drive_url)
-                                    st.success(f"✅ {label} gerado!")
-                                    st.download_button(
-                                        "⬇️ Baixar",
-                                        data=conteudo,
-                                        file_name=f"{uc_nome} - {serie or ''}.docx".replace("/", "-"),
-                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                        key=f"dl_{tipo}_{uc_id}"
-                                    )
-                                except Exception as e:
-                                    st.error(f"❌ {str(e)}")
+                        # Verifica se ja tem no banco
+                        conteudo_salvo = carregar_doc_gerado(uc_id, tipo)
+                        nome_arquivo = f"{uc_nome[:30]} - {label}.docx".replace("/", "-")
+
+                        # Label curto com icone para o botao
+                        icone = ICONES_DOCUMENTO.get(tipo, "")
+                        label_curto = {
+                            "fo_plano": f"{icone} FO",
+                            "apostila": f"{icone} Apostila",
+                            "atividades": f"{icone} Atividades",
+                            "avaliacao": f"{icone} Avaliacao",
+                        }.get(tipo, label)
+
+                        if conteudo_salvo:
+                            # Ja gerado — download direto do banco (zero tokens)
+                            st.download_button(
+                                f"Baixar {label_curto}",
+                                data=conteudo_salvo,
+                                file_name=nome_arquivo,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"dl_{tipo}_{uc_id}",
+                                use_container_width=True
+                            )
+                            if st.button(
+                                f"Regenerar {label_curto}",
+                                key=f"btn_{tipo}_{uc_id}",
+                                help="Consome tokens da API. Use apenas se necessario.",
+                                use_container_width=True
+                            ):
+                                with st.spinner(f"Regenerando {icone} {label}..."):
+                                    try:
+                                        drive_id, drive_url, conteudo = gerar_e_salvar(
+                                            uc_id, uc_nome, tipo, config
+                                        )
+                                        registrar_doc_gerado(uc_id, tipo, drive_id, drive_url, conteudo)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Erro: {str(e)}")
+                        else:
+                            # Ainda nao gerado
+                            if st.button(
+                                f"Gerar {label_curto}",
+                                key=f"btn_{tipo}_{uc_id}",
+                                use_container_width=True
+                            ):
+                                with st.spinner(f"Gerando {icone} {label}..."):
+                                    try:
+                                        drive_id, drive_url, conteudo = gerar_e_salvar(
+                                            uc_id, uc_nome, tipo, config
+                                        )
+                                        registrar_doc_gerado(uc_id, tipo, drive_id, drive_url, conteudo)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Erro: {str(e)}")
 
         # Gerar tudo de uma vez
-        if st.button(f"⚡ Gerar TUDO para {uc_nome}", key=f"all_{uc_id}"):
+        if st.button(f"Gerar TUDO para {uc_nome}", key=f"all_{uc_id}"):
             progress = st.progress(0)
+            arquivos_gerados = {}
             for i, (tipo, label) in enumerate(TIPOS_DOCUMENTO.items()):
                 with st.spinner(f"Gerando {label}..."):
                     try:
-                        drive_id, drive_url, _ = gerar_e_salvar(uc_id, uc_nome, tipo, config)
-                        registrar_doc_gerado(uc_id, tipo, drive_id, drive_url)
+                        drive_id, drive_url, conteudo = gerar_e_salvar(uc_id, uc_nome, tipo, config)
+                        registrar_doc_gerado(uc_id, tipo, drive_id, drive_url, conteudo)
+                        arquivos_gerados[f"{label} - {uc_nome}"] = conteudo
                         progress.progress((i + 1) / len(TIPOS_DOCUMENTO))
                     except Exception as e:
-                        st.error(f"❌ {label}: {str(e)}")
-            st.success(f"✅ Todos os documentos de '{uc_nome}' gerados!")
-            st.rerun()
+                        st.error(f"Erro {label}: {str(e)}")
+            if arquivos_gerados:
+                st.success(f"Todos os documentos de {uc_nome} gerados!")
+                zip_bytes = criar_zip(arquivos_gerados, "tudo")
+                st.download_button(
+                    f"Baixar tudo em ZIP ({len(arquivos_gerados)} arquivos)",
+                    data=zip_bytes,
+                    file_name=f"{uc_nome[:40]}_completo.zip".replace("/", "-"),
+                    mime="application/zip",
+                    key=f"dl_tudo_{uc_id}"
+                )
 
         st.markdown("---")
 
 
 def pagina_status():
-    st.header("📊 Status dos Documentos")
+    st.header("Status dos Documentos")
     cursos = listar_cursos()
     if not cursos:
         st.info("Nenhuma ementa importada.")
         return
 
     for curso_id, nome, ciclo, carga in cursos:
-        st.subheader(f"📘 {nome}")
+        st.subheader(nome)
         st.caption(f"{ciclo or ''} | {carga or ''}")
         ucs = listar_ucs(curso_id)
         dados = []
@@ -537,16 +757,39 @@ def pagina_status():
             docs = listar_docs_gerados(uc_id)
             total += len(docs)
             dados.append({
-                "UC": uc_nome, "CH": ch_ha, "Série": serie or "-",
-                "Plano": "✅" if "plano_aulas" in docs else "⏳",
-                "Apostila": "✅" if "apostila" in docs else "⏳",
-                "Atividades": "✅" if "atividades" in docs else "⏳",
-                "Avaliação": "✅" if "avaliacao" in docs else "⏳",
+                "UC": uc_nome, "CH": ch_ha, "Serie": serie or "-",
+                "FO": "OK" if "fo_plano" in docs else "-",
+                "Apostila": "OK" if "apostila" in docs else "-",
+                "Atividades": "OK" if "atividades" in docs else "-",
+                "Avaliacao": "OK" if "avaliacao" in docs else "-",
             })
         st.dataframe(dados, use_container_width=True)
         total_possivel = len(ucs) * 4
         pct = (total / total_possivel * 100) if total_possivel > 0 else 0
         st.progress(pct / 100, text=f"{total}/{total_possivel} documentos ({pct:.0f}%)")
+
+        # Downloads disponiveis
+        st.markdown("**Downloads disponiveis:**")
+        for uc_id, uc_nome, ch_ha, ch_hr, serie in ucs:
+            docs = listar_docs_gerados(uc_id)
+            if not docs:
+                continue
+            with st.expander(f"{uc_nome} — {len(docs)} documento(s)"):
+                cols = st.columns(4)
+                for i, (tipo, label) in enumerate(TIPOS_DOCUMENTO.items()):
+                    with cols[i]:
+                        conteudo = carregar_doc_gerado(uc_id, tipo)
+                        if conteudo:
+                            nome_arq = f"{uc_nome[:30]} - {label}.docx".replace("/", "-")
+                            st.download_button(
+                                label,
+                                data=conteudo,
+                                file_name=nome_arq,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"status_dl_{tipo}_{uc_id}"
+                            )
+                        else:
+                            st.caption(f"{label}: nao gerado")
         st.divider()
 
 
@@ -555,6 +798,7 @@ def pagina_status():
 def main():
     if not check_login():
         return
+    garantir_coluna_conteudo()
 
     st.markdown("""
     <div class="main-header">
