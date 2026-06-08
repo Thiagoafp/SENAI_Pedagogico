@@ -12,6 +12,7 @@ import io
 import zipfile
 import tempfile
 from pathlib import Path
+from extrator_ementa import criar_banco
 
 st.set_page_config(
     page_title="SENAI - Sistema Pedagógico",
@@ -798,6 +799,7 @@ def pagina_status():
 def main():
     if not check_login():
         return
+    criar_banco()           # garante que todas as tabelas existem
     garantir_coluna_conteudo()
 
     st.markdown("""
